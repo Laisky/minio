@@ -50,11 +50,12 @@ const (
 	yyyymmdd        = "20060102"
 )
 
-type serviceType string
+// ServiceType service type
+type ServiceType string
 
 const (
-	serviceS3  serviceType = "s3"
-	serviceSTS serviceType = "sts"
+	serviceS3  ServiceType = "s3"
+	serviceSTS ServiceType = "sts"
 )
 
 // getCanonicalHeaders generate a list of request headers with their values
@@ -138,7 +139,7 @@ func getStringToSign(canonicalRequest string, t time.Time, scope string) string 
 }
 
 // getSigningKey hmac seed to calculate final signature.
-func getSigningKey(secretKey string, t time.Time, region string, stype serviceType) []byte {
+func getSigningKey(secretKey string, t time.Time, region string, stype ServiceType) []byte {
 	date := sumHMAC([]byte("AWS4"+secretKey), []byte(t.Format(yyyymmdd)))
 	regionBytes := sumHMAC(date, []byte(region))
 	service := sumHMAC(regionBytes, []byte(stype))
@@ -208,7 +209,7 @@ func doesPolicySignatureV4Match(formValues http.Header) (auth.Credentials, APIEr
 //   - http://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
 //
 // returns ErrNone if the signature matches.
-func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region string, stype serviceType) APIErrorCode {
+func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region string, stype ServiceType) APIErrorCode {
 	// Copy request
 	req := *r
 
@@ -341,7 +342,12 @@ func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region s
 //   - http://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
 //
 // returns ErrNone if signature matches.
-func doesSignatureMatch(hashedPayload string, r *http.Request, region string, stype serviceType) APIErrorCode {
+func doesSignatureMatch(hashedPayload string, r *http.Request, region string, stype ServiceType, opts ...VerifyOption) APIErrorCode {
+	opt, gerr := new(verifyOption).apply(opts...)
+	if gerr != nil {
+		return ErrInvalidArgument
+	}
+
 	// Copy request.
 	req := *r
 
@@ -360,9 +366,13 @@ func doesSignatureMatch(hashedPayload string, r *http.Request, region string, st
 		return errCode
 	}
 
-	cred, _, s3Err := checkKeyValid(r, signV4Values.Credential.accessKey)
-	if s3Err != ErrNone {
-		return s3Err
+	cred := opt.credential
+	if opt.credential.AccessKey == "" {
+		var s3Err APIErrorCode
+		cred, _, s3Err = checkKeyValid(r, signV4Values.Credential.accessKey)
+		if s3Err != ErrNone {
+			return s3Err
+		}
 	}
 
 	// Extract date, if not present throw error.

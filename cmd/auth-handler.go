@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -525,11 +526,49 @@ func isReqAuthenticatedV2(r *http.Request) (s3Error APIErrorCode) {
 	return doesPresignV2SignatureMatch(r)
 }
 
-func reqSignatureV4Verify(r *http.Request, region string, stype serviceType) (s3Error APIErrorCode) {
+type verifyOption struct {
+	credential auth.Credentials
+}
+
+func (o *verifyOption) apply(fs ...VerifyOption) (*verifyOption, error) {
+	for _, f := range fs {
+		if err := f(o); err != nil {
+			return nil, err
+		}
+	}
+
+	return o, nil
+}
+
+// VerifyOption option argument for Verify function.
+type VerifyOption func(*verifyOption) error
+
+// SignatureV4VerifyCredential skips access key verification.
+func SignatureV4VerifyCredential(secretID, secretKey string) VerifyOption {
+	return func(o *verifyOption) error {
+		o.credential = auth.Credentials{
+			AccessKey: secretID,
+			SecretKey: secretKey,
+		}
+		return nil
+	}
+}
+
+// ReqSignatureV4Verify verifies if request has valid AWS Signature Version '4'.
+func ReqSignatureV4Verify(r *http.Request, region string, stype ServiceType, opts ...VerifyOption) error {
+	errCode := reqSignatureV4Verify(r, region, stype, opts...)
+	if errCode != ErrNone {
+		return fmt.Errorf("[%d]%s", errCode, errorCodes.ToAPIErr(errCode).Description)
+	}
+
+	return nil
+}
+
+func reqSignatureV4Verify(r *http.Request, region string, stype ServiceType, opts ...VerifyOption) (s3Error APIErrorCode) {
 	sha256sum := getContentSha256Cksum(r, stype)
 	switch {
 	case isRequestSignatureV4(r):
-		return doesSignatureMatch(sha256sum, r, region, stype)
+		return doesSignatureMatch(sha256sum, r, region, stype, opts...)
 	case isRequestPresignedSignatureV4(r):
 		return doesPresignedSignatureMatch(sha256sum, r, region, stype)
 	default:
@@ -538,7 +577,7 @@ func reqSignatureV4Verify(r *http.Request, region string, stype serviceType) (s3
 }
 
 // Verify if request has valid AWS Signature Version '4'.
-func isReqAuthenticated(ctx context.Context, r *http.Request, region string, stype serviceType) (s3Error APIErrorCode) {
+func isReqAuthenticated(ctx context.Context, r *http.Request, region string, stype ServiceType) (s3Error APIErrorCode) {
 	if errCode := reqSignatureV4Verify(r, region, stype); errCode != ErrNone {
 		return errCode
 	}
