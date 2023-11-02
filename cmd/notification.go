@@ -1060,6 +1060,10 @@ func (sys *NotificationSys) restClientFromHash(s string) (client *peerRESTClient
 
 // GetPeerOnlineCount gets the count of online and offline nodes.
 func (sys *NotificationSys) GetPeerOnlineCount() (nodesOnline, nodesOffline int) {
+	if sys == nil {
+		return
+	}
+
 	nodesOnline = 1 // Self is always online.
 	nodesOffline = 0
 	nodesOnlineIndex := make([]bool, len(sys.peerClients))

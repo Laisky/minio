@@ -7,7 +7,7 @@ require (
   github.com/minio/minio v0.0.1
 )
 
-replace github.com/minio/minio v0.0.1 => github.com/Laisky/minio v0.0.0-20231031094559-410cffc6552e
+replace github.com/minio/minio v0.0.1 => github.com/Laisky/minio laisky
 ```
 
 ## New Features
