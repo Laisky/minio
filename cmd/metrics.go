@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -73,9 +74,11 @@ const (
 )
 
 func init() {
-	prometheus.MustRegister(httpRequestsDuration)
-	prometheus.MustRegister(newMinioCollector())
-	prometheus.MustRegister(minioVersionInfo)
+	if strings.ToLower(os.Getenv("ENABLE_MINIO_METRICS")) == "true" {
+		prometheus.MustRegister(httpRequestsDuration)
+		prometheus.MustRegister(newMinioCollector())
+		prometheus.MustRegister(minioVersionInfo)
+	}
 }
 
 // newMinioCollector describes the collector
