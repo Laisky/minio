@@ -86,7 +86,7 @@ func skipContentSha256Cksum(r *http.Request) bool {
 
 // Returns SHA256 for calculating canonical-request.
 func getContentSha256Cksum(r *http.Request, stype ServiceType) string {
-	if stype == serviceSTS {
+	if stype != serviceS3 && r.Body != nil {
 		payload, err := io.ReadAll(io.LimitReader(r.Body, stsRequestBodyLimit))
 		if err != nil {
 			logger.CriticalIf(GlobalContext, err)
