@@ -27,9 +27,11 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/config"
 	"github.com/minio/minio/internal/config/api"
+	"github.com/minio/minio/internal/config/cache"
 	"github.com/minio/minio/internal/config/callhome"
 	"github.com/minio/minio/internal/config/compress"
 	"github.com/minio/minio/internal/config/dns"
+	"github.com/minio/minio/internal/config/drive"
 	"github.com/minio/minio/internal/config/etcd"
 	"github.com/minio/minio/internal/config/heal"
 	xldap "github.com/minio/minio/internal/config/identity/ldap"
@@ -68,6 +70,8 @@ func initHelp() {
 		config.ScannerSubSys:        scanner.DefaultKVS,
 		config.SubnetSubSys:         subnet.DefaultKVS,
 		config.CallhomeSubSys:       callhome.DefaultKVS,
+		config.DriveSubSys:          drive.DefaultKVS,
+		config.CacheSubSys:          cache.DefaultKVS,
 	}
 	for k, v := range notify.DefaultNotificationKVS {
 		kvs[k] = v
@@ -94,6 +98,10 @@ func initHelp() {
 			Type:        "string",
 			Description: "enable callhome to MinIO SUBNET",
 			Optional:    true,
+		},
+		config.HelpKV{
+			Key:         config.DriveSubSys,
+			Description: "enable drive specific settings",
 		},
 		config.HelpKV{
 			Key:         config.SiteSubSys,
@@ -206,6 +214,12 @@ func initHelp() {
 			Key:         config.EtcdSubSys,
 			Description: "persist IAM assets externally to etcd",
 		},
+		config.HelpKV{
+			Key:         config.CacheSubSys,
+			Type:        "string",
+			Description: "enable various cache optimizations on MinIO for reads",
+			Optional:    true,
+		},
 	}
 
 	if globalIsErasure {
@@ -250,6 +264,8 @@ func initHelp() {
 		config.LambdaWebhookSubSys:  lambda.HelpWebhook,
 		config.SubnetSubSys:         subnet.HelpSubnet,
 		config.CallhomeSubSys:       callhome.HelpCallhome,
+		config.DriveSubSys:          drive.HelpDrive,
+		config.CacheSubSys:          cache.Help,
 	}
 
 	config.RegisterHelpSubSys(helpMap)
@@ -356,6 +372,14 @@ func validateSubSysConfig(ctx context.Context, s config.Config, subSys string, o
 		// callhome cannot be enabled if license is not registered yet, throw an error.
 		if cfg.Enabled() && !globalSubnetConfig.Registered() {
 			return errors.New("Deployment is not registered with SUBNET. Please register the deployment via 'mc license register ALIAS'")
+		}
+	case config.DriveSubSys:
+		if _, err := drive.LookupConfig(s[config.DriveSubSys][config.Default]); err != nil {
+			return err
+		}
+	case config.CacheSubSys:
+		if _, err := cache.LookupConfig(s[config.CacheSubSys][config.Default], globalRemoteTargetTransport); err != nil {
+			return err
 		}
 	case config.PolicyOPASubSys:
 		// In case legacy OPA config is being set, we treat it as if the
@@ -618,7 +642,7 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		if err != nil {
 			logger.LogIf(ctx, fmt.Errorf("Unable to parse subnet configuration: %w", err))
 		} else {
-			globalSubnetConfig.Update(subnetConfig)
+			globalSubnetConfig.Update(subnetConfig, globalIsCICD)
 			globalSubnetConfig.ApplyEnv() // update environment settings for Console UI
 		}
 	case config.CallhomeSubSys:
@@ -631,6 +655,22 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 			if enable {
 				initCallhome(ctx, objAPI)
 			}
+		}
+	case config.DriveSubSys:
+		if driveConfig, err := drive.LookupConfig(s[config.DriveSubSys][config.Default]); err != nil {
+			logger.LogIf(ctx, fmt.Errorf("Unable to load drive config: %w", err))
+		} else {
+			err := globalDriveConfig.Update(driveConfig)
+			if err != nil {
+				logger.LogIf(ctx, fmt.Errorf("Unable to update drive config: %v", err))
+			}
+		}
+	case config.CacheSubSys:
+		cacheCfg, err := cache.LookupConfig(s[config.CacheSubSys][config.Default], globalRemoteTargetTransport)
+		if err != nil {
+			logger.LogIf(ctx, fmt.Errorf("Unable to load cache config: %w", err))
+		} else {
+			globalCacheConfig.Update(cacheCfg)
 		}
 	}
 	globalServerConfigMu.Lock()

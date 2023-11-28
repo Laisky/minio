@@ -261,6 +261,9 @@ func (r *BatchJobKeyRotateV1) Start(ctx context.Context, api ObjectLayer, job Ba
 	if err := ri.load(ctx, api, job); err != nil {
 		return err
 	}
+	if ri.Complete {
+		return nil
+	}
 
 	globalBatchJobsMetrics.save(job.ID, ri)
 	lastObject := ri.Object
@@ -356,9 +359,9 @@ func (r *BatchJobKeyRotateV1) Start(ctx context.Context, api ObjectLayer, job Ba
 	ctx, cancel := context.WithCancel(ctx)
 
 	results := make(chan ObjectInfo, 100)
-	if err := api.Walk(ctx, r.Bucket, r.Prefix, results, ObjectOptions{
-		WalkMarker: lastObject,
-		WalkFilter: skip,
+	if err := api.Walk(ctx, r.Bucket, r.Prefix, results, WalkOptions{
+		Marker: lastObject,
+		Filter: skip,
 	}); err != nil {
 		cancel()
 		// Do not need to retry if we can't list objects on source.

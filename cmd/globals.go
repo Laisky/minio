@@ -38,9 +38,11 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/minio/minio/internal/auth"
+	"github.com/minio/minio/internal/config/cache"
 	"github.com/minio/minio/internal/config/callhome"
 	"github.com/minio/minio/internal/config/compress"
 	"github.com/minio/minio/internal/config/dns"
+	"github.com/minio/minio/internal/config/drive"
 	idplugin "github.com/minio/minio/internal/config/identity/plugin"
 	polplugin "github.com/minio/minio/internal/config/policy/plugin"
 	"github.com/minio/minio/internal/config/storageclass"
@@ -241,6 +243,12 @@ var (
 
 	// The global callhome config
 	globalCallhomeConfig callhome.Config
+
+	// The global drive config
+	globalDriveConfig drive.Config
+
+	// The global cache config
+	globalCacheConfig cache.Config
 
 	// Global server's network statistics
 	globalConnStats = newConnStats()

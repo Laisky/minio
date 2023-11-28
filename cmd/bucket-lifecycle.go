@@ -42,7 +42,9 @@ import (
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/s3select"
 	"github.com/minio/pkg/v2/env"
+	xnet "github.com/minio/pkg/v2/net"
 	"github.com/minio/pkg/v2/workers"
+	"github.com/zeebo/xxh3"
 )
 
 const (
@@ -223,11 +225,19 @@ type transitionState struct {
 	lastDayStats map[string]*lastDayTierStats
 }
 
-func (t *transitionState) queueTransitionTask(oi ObjectInfo, event lifecycle.Event, src lcEventSrc) {
-	select {
-	case <-t.ctx.Done():
-	case t.transitionCh <- transitionTask{objInfo: oi, event: event, src: src}:
-	default:
+func (t *transitionState) queueTransitionTask(oi ObjectInfo, event lifecycle.Event, src lcEventSrc, blocking bool) {
+	task := transitionTask{objInfo: oi, event: event, src: src}
+	if blocking {
+		select {
+		case <-t.ctx.Done():
+		case t.transitionCh <- task:
+		}
+	} else {
+		select {
+		case <-t.ctx.Done():
+		case t.transitionCh <- task:
+		default:
+		}
 	}
 }
 
@@ -237,7 +247,7 @@ var globalTransitionState *transitionState
 // via its Init method.
 func newTransitionState(ctx context.Context) *transitionState {
 	return &transitionState{
-		transitionCh: make(chan transitionTask, 10000),
+		transitionCh: make(chan transitionTask, 100000),
 		ctx:          ctx,
 		killCh:       make(chan struct{}),
 		lastDayStats: make(map[string]*lastDayTierStats),
@@ -280,9 +290,11 @@ func (t *transitionState) worker(objectAPI ObjectLayer) {
 			}
 			atomic.AddInt32(&t.activeTasks, 1)
 			if err := transitionObject(t.ctx, objectAPI, task.objInfo, newLifecycleAuditEvent(task.src, task.event)); err != nil {
-				if !isErrVersionNotFound(err) && !isErrObjectNotFound(err) {
-					logger.LogIf(t.ctx, fmt.Errorf("Transition to %s failed for %s/%s version:%s with %w",
-						task.event.StorageClass, task.objInfo.Bucket, task.objInfo.Name, task.objInfo.VersionID, err))
+				if !isErrVersionNotFound(err) && !isErrObjectNotFound(err) && !xnet.IsNetworkOrHostDown(err, false) {
+					if !strings.Contains(err.Error(), "use of closed network connection") {
+						logger.LogIf(t.ctx, fmt.Errorf("Transition to %s failed for %s/%s version:%s with %w",
+							task.event.StorageClass, task.objInfo.Bucket, task.objInfo.Name, task.objInfo.VersionID, err))
+					}
 				}
 			} else {
 				ts := tierStats{
@@ -367,7 +379,7 @@ func enqueueTransitionImmediate(obj ObjectInfo, src lcEventSrc) {
 	if lc, err := globalLifecycleSys.Get(obj.Bucket); err == nil {
 		switch event := lc.Eval(obj.ToLifecycleOpts()); event.Action {
 		case lifecycle.TransitionAction, lifecycle.TransitionVersionAction:
-			globalTransitionState.queueTransitionTask(obj, event, src)
+			globalTransitionState.queueTransitionTask(obj, event, src, true)
 		}
 	}
 }
@@ -444,7 +456,8 @@ func genTransitionObjName(bucket string) (string, error) {
 		return "", err
 	}
 	us := u.String()
-	obj := fmt.Sprintf("%s/%s/%s/%s/%s", globalDeploymentID(), bucket, us[0:2], us[2:4], us)
+	hash := xxh3.HashString(pathJoin(globalDeploymentID(), bucket))
+	obj := fmt.Sprintf("%s/%s/%s/%s", strconv.FormatUint(hash, 16), us[0:2], us[2:4], us)
 	return obj, nil
 }
 
@@ -862,6 +875,7 @@ func (oi ObjectInfo) ToLifecycleOpts() lifecycle.ObjectOpts {
 		UserTags:         oi.UserTags,
 		VersionID:        oi.VersionID,
 		ModTime:          oi.ModTime,
+		Size:             oi.Size,
 		IsLatest:         oi.IsLatest,
 		NumVersions:      oi.NumVersions,
 		DeleteMarker:     oi.DeleteMarker,

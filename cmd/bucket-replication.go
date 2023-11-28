@@ -639,19 +639,23 @@ func replicateDeleteToTarget(ctx context.Context, dobj DeletedObjectReplicationI
 				IsReplicationReadyForDeleteMarker: true,
 			},
 		})
+		serr := ErrorRespToObjectError(err, dobj.Bucket, dobj.ObjectName, dobj.VersionID)
 		switch {
-		case isErrMethodNotAllowed(ErrorRespToObjectError(err, dobj.Bucket, dobj.ObjectName)):
+		case isErrMethodNotAllowed(serr):
 			// delete marker already replicated
 			if dobj.VersionID == "" && rinfo.VersionPurgeStatus.Empty() {
 				rinfo.ReplicationStatus = replication.Completed
 				return
 			}
-		case isErrObjectNotFound(ErrorRespToObjectError(err, dobj.Bucket, dobj.ObjectName)):
+		case isErrObjectNotFound(serr), isErrVersionNotFound(serr):
 			// version being purged is already not found on target.
 			if !rinfo.VersionPurgeStatus.Empty() {
 				rinfo.VersionPurgeStatus = Complete
 				return
 			}
+		case isErrReadQuorum(serr), isErrWriteQuorum(serr):
+			// destination has some quorum issues, perform removeObject() anyways
+			// to complete the operation.
 		default:
 			if err != nil && minio.IsNetworkOrHostDown(err, true) && !globalBucketTargetSys.isOffline(tgt.EndpointURL()) {
 				globalBucketTargetSys.markOffline(tgt.EndpointURL())
@@ -777,6 +781,7 @@ func putReplicationOpts(ctx context.Context, sc string, objInfo ObjectInfo) (put
 		UserMetadata:    meta,
 		ContentType:     objInfo.ContentType,
 		ContentEncoding: objInfo.ContentEncoding,
+		Expires:         objInfo.Expires,
 		StorageClass:    sc,
 		Internal: minio.AdvancedPutOptions{
 			SourceVersionID:    objInfo.VersionID,
@@ -1382,7 +1387,6 @@ func (ri ReplicateObjectInfo) replicateAll(ctx context.Context, objectAPI Object
 		rinfo.Duration = time.Since(startTime)
 	}()
 
-	rAction = replicateAll
 	oi, cerr := tgt.StatObject(ctx, tgt.Bucket, object, minio.StatObjectOptions{
 		VersionID: objInfo.VersionID,
 		Internal: minio.AdvancedGetOptions{
@@ -1419,16 +1423,19 @@ func (ri ReplicateObjectInfo) replicateAll(ctx context.Context, objectAPI Object
 			}
 			return
 		}
-	}
-	// if target returns error other than NoSuchKey, defer replication attempt
-	if cerr != nil {
+	} else {
+		// if target returns error other than NoSuchKey, defer replication attempt
 		if minio.IsNetworkOrHostDown(cerr, true) && !globalBucketTargetSys.isOffline(tgt.EndpointURL()) {
 			globalBucketTargetSys.markOffline(tgt.EndpointURL())
 		}
 
-		errResp := minio.ToErrorResponse(cerr)
-		switch errResp.Code {
-		case "NoSuchKey", "NoSuchVersion", "SlowDownRead":
+		serr := ErrorRespToObjectError(cerr, bucket, object, objInfo.VersionID)
+		switch {
+		case isErrMethodNotAllowed(serr):
+			rAction = replicateAll
+		case isErrObjectNotFound(serr), isErrVersionNotFound(serr):
+			rAction = replicateAll
+		case isErrReadQuorum(serr), isErrWriteQuorum(serr):
 			rAction = replicateAll
 		default:
 			rinfo.Err = cerr
@@ -2572,7 +2579,7 @@ func (s *replicationResyncer) resyncBucket(ctx context.Context, objectAPI Object
 
 	// Walk through all object versions - Walk() is always in ascending order needed to ensure
 	// delete marker replicated to target after object version is first created.
-	if err := objectAPI.Walk(ctx, opts.bucket, "", objInfoCh, ObjectOptions{}); err != nil {
+	if err := objectAPI.Walk(ctx, opts.bucket, "", objInfoCh, WalkOptions{}); err != nil {
 		logger.LogIf(ctx, err)
 		return
 	}
@@ -2945,7 +2952,7 @@ func getReplicationDiff(ctx context.Context, objAPI ObjectLayer, bucket string, 
 	}
 
 	objInfoCh := make(chan ObjectInfo, 10)
-	if err := objAPI.Walk(ctx, bucket, opts.Prefix, objInfoCh, ObjectOptions{}); err != nil {
+	if err := objAPI.Walk(ctx, bucket, opts.Prefix, objInfoCh, WalkOptions{}); err != nil {
 		logger.LogIf(ctx, err)
 		return nil, err
 	}
@@ -3187,12 +3194,16 @@ func (p *ReplicationPool) queueMRFSave(entry MRFReplicateEntry) {
 	}
 }
 
-func (p *ReplicationPool) persistToDrive(ctx context.Context, v MRFReplicateEntries, data []byte) {
+func (p *ReplicationPool) persistToDrive(ctx context.Context, v MRFReplicateEntries) {
 	newReader := func() io.ReadCloser {
 		r, w := io.Pipe()
 		go func() {
+			// Initialize MRF meta header.
+			var data [4]byte
+			binary.LittleEndian.PutUint16(data[0:2], mrfMetaFormat)
+			binary.LittleEndian.PutUint16(data[2:4], mrfMetaVersion)
 			mw := msgp.NewWriter(w)
-			n, err := mw.Write(data)
+			n, err := mw.Write(data[:])
 			if err != nil {
 				w.CloseWithError(err)
 				return
@@ -3230,15 +3241,10 @@ func (p *ReplicationPool) saveMRFEntries(ctx context.Context, entries map[string
 
 	v := MRFReplicateEntries{
 		Entries: entries,
-		Version: mrfMetaVersionV1,
+		Version: mrfMetaVersion,
 	}
-	data := make([]byte, 4, v.Msgsize()+4)
 
-	// Initialize the resync meta header.
-	binary.LittleEndian.PutUint16(data[0:2], mrfMetaFormat)
-	binary.LittleEndian.PutUint16(data[2:4], mrfMetaVersion)
-
-	p.persistToDrive(ctx, v, data)
+	p.persistToDrive(ctx, v)
 }
 
 // load mrf entries from disk
