@@ -321,10 +321,7 @@ func (c *Connection) Request(ctx context.Context, h HandlerID, req []byte) ([]by
 	if c.State() != StateConnected {
 		return nil, ErrDisconnected
 	}
-	handler := c.handlers.single[h]
-	if handler == nil {
-		return nil, ErrUnknownHandler
-	}
+	// Create mux client and call.
 	client, err := c.newMuxClient(ctx)
 	if err != nil {
 		return nil, err
@@ -349,10 +346,7 @@ func (c *Subroute) Request(ctx context.Context, h HandlerID, req []byte) ([]byte
 	if c.State() != StateConnected {
 		return nil, ErrDisconnected
 	}
-	handler := c.handlers.subSingle[makeZeroSubHandlerID(h)]
-	if handler == nil {
-		return nil, ErrUnknownHandler
-	}
+	// Create mux client and call.
 	client, err := c.newMuxClient(ctx)
 	if err != nil {
 		return nil, err
@@ -544,7 +538,10 @@ func (c *Connection) send(msg []byte) error {
 // queueMsg queues a message, with an optional payload.
 // sender should not reference msg.Payload
 func (c *Connection) queueMsg(msg message, payload sender) error {
-	msg.Flags |= c.baseFlags
+	// Add baseflags.
+	msg.Flags.Set(c.baseFlags)
+	// This cannot encode subroute.
+	msg.Flags.Clear(FlagSubroute)
 	if payload != nil {
 		if cap(msg.Payload) < payload.Msgsize() {
 			old := msg.Payload
@@ -789,7 +786,7 @@ func (c *Connection) handleIncoming(ctx context.Context, conn net.Conn, req conn
 		if debugPrint {
 			fmt.Println("expected to be client side, not server side")
 		}
-		return errors.New("expected to be client side, not server side")
+		return errors.New("grid: expected to be client side, not server side")
 	}
 	msg := message{
 		Op: OpConnectResponse,
@@ -902,7 +899,6 @@ func (c *Connection) handleMessages(ctx context.Context, conn net.Conn) {
 					}
 					continue
 				}
-
 				if int64(cap(dst)) < hdr.Length+1 {
 					dst = make([]byte, 0, hdr.Length+hdr.Length>>3)
 				}
@@ -916,6 +912,10 @@ func (c *Connection) handleMessages(ctx context.Context, conn net.Conn) {
 			if atomic.LoadUint32((*uint32)(&c.state)) != StateConnected {
 				cancel(ErrDisconnected)
 				return
+			}
+			if cap(msg) > readBufferSize*8 {
+				// Don't keep too much memory around.
+				msg = nil
 			}
 
 			var err error
@@ -1156,6 +1156,8 @@ func (c *Connection) handleMsg(ctx context.Context, m message, subID *subHandler
 		c.handleAckMux(ctx, m)
 	case OpConnectMux:
 		c.handleConnectMux(ctx, m, subID)
+	case OpMuxConnectError:
+		c.handleConnectMuxError(ctx, m)
 	default:
 		logger.LogIf(ctx, fmt.Errorf("unknown message type: %v", m.Op))
 	}
@@ -1205,6 +1207,18 @@ func (c *Connection) handleConnectMux(ctx context.Context, m message, subID *sub
 			return newMuxStream(ctx, m, c, *handler)
 		})
 	}
+}
+
+// handleConnectMuxError when mux connect was rejected.
+func (c *Connection) handleConnectMuxError(ctx context.Context, m message) {
+	if v, ok := c.outgoing.Load(m.MuxID); ok {
+		var cErr muxConnectError
+		_, err := cErr.UnmarshalMsg(m.Payload)
+		logger.LogIf(ctx, err)
+		v.error(RemoteErr(cErr.Error))
+		return
+	}
+	PutByteBuffer(m.Payload)
 }
 
 func (c *Connection) handleAckMux(ctx context.Context, m message) {

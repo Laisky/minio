@@ -60,6 +60,7 @@ import (
 	xnet "github.com/minio/pkg/v2/net"
 	"github.com/minio/pkg/v2/policy"
 	"github.com/secure-io/sio-go"
+	"github.com/zeebo/xxh3"
 )
 
 const (
@@ -148,7 +149,7 @@ func (a adminAPIHandlers) ServerUpdateHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// Download Binary Once
-	reader, err := downloadBinary(u, mode)
+	bin, err := downloadBinary(u, mode)
 	if err != nil {
 		logger.LogIf(ctx, fmt.Errorf("server update failed with %w", err))
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
@@ -156,7 +157,7 @@ func (a adminAPIHandlers) ServerUpdateHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// Push binary to other servers
-	for _, nerr := range globalNotificationSys.VerifyBinary(ctx, u, sha256Sum, releaseInfo, reader) {
+	for _, nerr := range globalNotificationSys.VerifyBinary(ctx, u, sha256Sum, releaseInfo, bin) {
 		if nerr.Err != nil {
 			err := AdminError{
 				Code:       AdminUpdateApplyFailure,
@@ -170,7 +171,7 @@ func (a adminAPIHandlers) ServerUpdateHandler(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	err = verifyBinary(u, sha256Sum, releaseInfo, mode, reader)
+	err = verifyBinary(u, sha256Sum, releaseInfo, mode, bytes.NewReader(bin))
 	if err != nil {
 		logger.LogIf(ctx, fmt.Errorf("server update failed with %w", err))
 		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
@@ -226,8 +227,6 @@ func (a adminAPIHandlers) ServerUpdateHandler(w http.ResponseWriter, r *http.Req
 // ServiceHandler - POST /minio/admin/v3/service?action={action}
 // ----------
 // Supports following actions:
-// - restart (restarts all the MinIO instances in a setup)
-// - stop (stops all the MinIO instances in a setup)
 // - freeze (freezes all incoming S3 API calls)
 // - unfreeze (unfreezes previously frozen S3 API calls)
 func (a adminAPIHandlers) ServiceHandler(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +236,85 @@ func (a adminAPIHandlers) ServiceHandler(w http.ResponseWriter, r *http.Request)
 	action := vars["action"]
 
 	var serviceSig serviceSignal
-	switch madmin.ServiceAction(action) {
+	switch act := madmin.ServiceAction(action); act {
+	case madmin.ServiceActionFreeze:
+		serviceSig = serviceFreeze
+	case madmin.ServiceActionUnfreeze:
+		serviceSig = serviceUnFreeze
+	default:
+		process := act == madmin.ServiceActionRestart || act == madmin.ServiceActionStop
+		if process {
+			apiErr := errorCodes.ToAPIErr(ErrMalformedPOSTRequest)
+			apiErr.Description = "process actions are not supported via this API anymore, please upgrade 'mc' or madmin-go to use ServiceV2() API"
+			writeErrorResponseJSON(ctx, w, apiErr, r.URL)
+			return
+		}
+		logger.LogIf(ctx, fmt.Errorf("Unrecognized service action %s requested", action), logger.Application)
+		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrMalformedPOSTRequest), r.URL)
+		return
+	}
+
+	objectAPI, _ := validateAdminReq(ctx, w, r, policy.ServiceFreezeAdminAction)
+	if objectAPI == nil {
+		return
+	}
+
+	// Notify all other MinIO peers signal service.
+	for _, nerr := range globalNotificationSys.SignalService(serviceSig) {
+		if nerr.Err != nil {
+			logger.GetReqInfo(ctx).SetTags("peerAddress", nerr.Host.String())
+			logger.LogIf(ctx, nerr.Err)
+		}
+	}
+
+	// Reply to the client before restarting, stopping MinIO server.
+	writeSuccessResponseHeadersOnly(w)
+
+	switch serviceSig {
+	case serviceFreeze:
+		freezeServices()
+	case serviceUnFreeze:
+		unfreezeServices()
+	}
+}
+
+type servicePeerResult struct {
+	Host          string                 `json:"host"`
+	Err           string                 `json:"err,omitempty"`
+	WaitingDrives map[string]DiskMetrics `json:"waitingDrives,omitempty"`
+}
+
+type serviceResult struct {
+	Action  madmin.ServiceAction `json:"action"`
+	Forced  bool                 `json:"forced"`
+	DryRun  bool                 `json:"dryRun"`
+	Results []servicePeerResult  `json:"results,omitempty"`
+}
+
+// ServiceV2Handler - POST /minio/admin/v3/service?action={action}&type=2
+// ----------
+// Supports following actions:
+// - restart (restarts all the MinIO instances in a setup)
+// - stop (stops all the MinIO instances in a setup)
+// - freeze (freezes all incoming S3 API calls)
+// - unfreeze (unfreezes previously frozen S3 API calls)
+//
+// This newer API now returns back status per remote peer and local regarding
+// if a "restart/stop" was successful or not. Service signal now supports
+// a dry-run that helps skip the nodes that may have hung drives. By default
+// restart/stop will ignore the servers that are hung on drives. You can use
+// 'force' param to force restart even with hung drives if needed.
+func (a adminAPIHandlers) ServiceV2Handler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	vars := mux.Vars(r)
+	action := vars["action"]
+	dryRun := r.Form.Get("dry-run") == "true"
+	force := r.Form.Get("force") == "true"
+
+	var serviceSig serviceSignal
+	act := madmin.ServiceAction(action)
+	switch act {
 	case madmin.ServiceActionRestart:
 		serviceSig = serviceRestart
 	case madmin.ServiceActionStop:
@@ -266,15 +343,57 @@ func (a adminAPIHandlers) ServiceHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Notify all other MinIO peers signal service.
-	for _, nerr := range globalNotificationSys.SignalService(serviceSig) {
-		if nerr.Err != nil {
-			logger.GetReqInfo(ctx).SetTags("peerAddress", nerr.Host.String())
-			logger.LogIf(ctx, nerr.Err)
+	nerrs := globalNotificationSys.SignalServiceV2(serviceSig, dryRun, force)
+	srvResult := serviceResult{Action: act, Results: make([]servicePeerResult, 0, len(nerrs))}
+
+	process := act == madmin.ServiceActionRestart || act == madmin.ServiceActionStop
+	var trigger bool
+	if process {
+		localhost := globalLocalNodeName
+		if globalLocalNodeName == "" {
+			localhost = "127.0.0.1"
 		}
+		waitingDrives := canWeRestartNode()
+		srvResult.Results = append(srvResult.Results, servicePeerResult{
+			Host:          localhost,
+			WaitingDrives: waitingDrives,
+		})
+		trigger = len(waitingDrives) == 0 || force
+	}
+
+	for _, nerr := range nerrs {
+		if nerr.Err != nil && process {
+			waitingDrives := map[string]DiskMetrics{}
+			jerr := json.Unmarshal([]byte(nerr.Err.Error()), &waitingDrives)
+			if jerr == nil {
+				srvResult.Results = append(srvResult.Results, servicePeerResult{
+					Host:          nerr.Host.String(),
+					WaitingDrives: waitingDrives,
+				})
+				continue
+			}
+		}
+		errStr := ""
+		if nerr.Err != nil {
+			errStr = nerr.Err.Error()
+		}
+		srvResult.Results = append(srvResult.Results, servicePeerResult{
+			Host: nerr.Host.String(),
+			Err:  errStr,
+		})
+	}
+
+	srvResult.Forced = force
+	srvResult.DryRun = dryRun
+
+	buf, err := json.Marshal(srvResult)
+	if err != nil {
+		writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
+		return
 	}
 
 	// Reply to the client before restarting, stopping MinIO server.
-	writeSuccessResponseHeadersOnly(w)
+	writeSuccessResponseJSON(w, buf)
 
 	switch serviceSig {
 	case serviceFreeze:
@@ -282,7 +401,9 @@ func (a adminAPIHandlers) ServiceHandler(w http.ResponseWriter, r *http.Request)
 	case serviceUnFreeze:
 		unfreezeServices()
 	case serviceRestart, serviceStop:
-		globalServiceSignalCh <- serviceSig
+		if !dryRun && trigger {
+			globalServiceSignalCh <- serviceSig
+		}
 	}
 }
 
@@ -339,7 +460,7 @@ func (a adminAPIHandlers) StorageInfoHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	storageInfo := objectAPI.StorageInfo(ctx)
+	storageInfo := objectAPI.StorageInfo(ctx, true)
 
 	// Collect any disk healing.
 	healing, _ := getAggregatedBackgroundHealState(ctx, nil)
@@ -1296,6 +1417,7 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 	customBucket := strings.TrimSpace(r.Form.Get(peerRESTBucket))
 	autotune := r.Form.Get("autotune") == "true"
 	noClear := r.Form.Get("noclear") == "true"
+	enableSha256 := r.Form.Get("enableSha256") == "true"
 
 	size, err := strconv.Atoi(sizeStr)
 	if err != nil {
@@ -1312,7 +1434,7 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 		duration = time.Second * 10
 	}
 
-	storageInfo := objectAPI.StorageInfo(ctx)
+	storageInfo := objectAPI.StorageInfo(ctx, true)
 
 	sufficientCapacity, canAutotune, capacityErrMsg := validateObjPerfOptions(ctx, storageInfo, concurrent, size, autotune)
 	if !sufficientCapacity {
@@ -1365,6 +1487,7 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 		autotune:         autotune,
 		storageClass:     storageClass,
 		bucketName:       customBucket,
+		enableSha256:     enableSha256,
 	})
 	var prevResult madmin.SpeedTestResult
 	for {
@@ -1910,7 +2033,7 @@ func getServerInfo(ctx context.Context, poolsInfoEnabled bool, r *http.Request) 
 		}
 	}
 
-	log, audit := fetchLoggerInfo()
+	log, audit := fetchLoggerInfo(ctx)
 
 	// Get the notification target info
 	notifyTarget := fetchLambdaInfo()
@@ -2500,11 +2623,27 @@ func getTLSInfo() madmin.TLSInfo {
 
 	if globalIsTLS {
 		for _, c := range globalPublicCerts {
+			check := xxh3.Hash(c.RawIssuer)
+			check ^= xxh3.Hash(c.RawSubjectPublicKeyInfo)
+			// We XOR, so order doesn't matter.
+			for _, v := range c.DNSNames {
+				check ^= xxh3.HashString(v)
+			}
+			for _, v := range c.EmailAddresses {
+				check ^= xxh3.HashString(v)
+			}
+			for _, v := range c.IPAddresses {
+				check ^= xxh3.HashString(v.String())
+			}
+			for _, v := range c.URIs {
+				check ^= xxh3.HashString(v.String())
+			}
 			tlsInfo.Certs = append(tlsInfo.Certs, madmin.TLSCert{
 				PubKeyAlgo:    c.PublicKeyAlgorithm.String(),
 				SignatureAlgo: c.SignatureAlgorithm.String(),
 				NotBefore:     c.NotBefore,
 				NotAfter:      c.NotAfter,
+				Checksum:      strconv.FormatUint(check, 16),
 			})
 		}
 	}
@@ -2555,7 +2694,7 @@ func assignPoolNumbers(servers []madmin.ServerProperties) {
 func fetchLambdaInfo() []map[string][]madmin.TargetIDStatus {
 	lambdaMap := make(map[string][]madmin.TargetIDStatus)
 
-	for _, tgt := range globalNotifyTargetList.Targets() {
+	for _, tgt := range globalEventNotifier.Targets() {
 		targetIDStatus := make(map[string]madmin.Status)
 		active, _ := tgt.IsActive()
 		targetID := tgt.ID()
@@ -2643,19 +2782,26 @@ func fetchKMSStatusV2(ctx context.Context) []madmin.KMS {
 	return stats
 }
 
+func targetStatus(ctx context.Context, h logger.Target) madmin.Status {
+	if h.IsOnline(ctx) {
+		return madmin.Status{Status: string(madmin.ItemOnline)}
+	}
+	return madmin.Status{Status: string(madmin.ItemOffline)}
+}
+
 // fetchLoggerDetails return log info
-func fetchLoggerInfo() ([]madmin.Logger, []madmin.Audit) {
+func fetchLoggerInfo(ctx context.Context) ([]madmin.Logger, []madmin.Audit) {
 	var loggerInfo []madmin.Logger
 	var auditloggerInfo []madmin.Audit
 	for _, tgt := range logger.SystemTargets() {
 		if tgt.Endpoint() != "" {
-			loggerInfo = append(loggerInfo, madmin.Logger{tgt.String(): logger.TargetStatus(GlobalContext, tgt)})
+			loggerInfo = append(loggerInfo, madmin.Logger{tgt.String(): targetStatus(ctx, tgt)})
 		}
 	}
 
 	for _, tgt := range logger.AuditTargets() {
 		if tgt.Endpoint() != "" {
-			auditloggerInfo = append(auditloggerInfo, madmin.Audit{tgt.String(): logger.TargetStatus(GlobalContext, tgt)})
+			auditloggerInfo = append(auditloggerInfo, madmin.Audit{tgt.String(): targetStatus(ctx, tgt)})
 		}
 	}
 
@@ -2709,7 +2855,7 @@ func getClusterMetaInfo(ctx context.Context) []byte {
 		ci.Info.NoOfServers = len(globalEndpoints.Hostnames())
 		ci.Info.MinioVersion = Version
 
-		si := objectAPI.StorageInfo(ctx)
+		si := objectAPI.StorageInfo(ctx, true)
 
 		ci.Info.NoOfDrives = len(si.Disks)
 		for _, disk := range si.Disks {
@@ -3028,7 +3174,7 @@ func createHostAnonymizerForFSMode() map[string]string {
 // anonymizeHost - Add entries related to given endpoint in the host anonymizer map
 // The health report data can contain the hostname in various forms e.g. host, host:port,
 // host:port/drivepath, full url (http://host:port/drivepath)
-// The anonymizer map will have mappings for all these varients for efficiently replacing
+// The anonymizer map will have mappings for all these variants for efficiently replacing
 // any of these strings to the anonymized versions at the time of health report generation.
 func anonymizeHost(hostAnonymizer map[string]string, endpoint Endpoint, poolNum int, srvrNum int) {
 	if len(endpoint.Host) == 0 {
@@ -3076,7 +3222,7 @@ func anonymizeHost(hostAnonymizer map[string]string, endpoint Endpoint, poolNum 
 	}
 }
 
-// createHostAnonymizer - Creats a map of various strings to corresponding anonymized names
+// createHostAnonymizer - Creates a map of various strings to corresponding anonymized names
 func createHostAnonymizer() map[string]string {
 	if !globalIsDistErasure {
 		return createHostAnonymizerForFSMode()

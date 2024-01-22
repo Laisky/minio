@@ -118,6 +118,9 @@ const (
 	SubnetSubSys         = madmin.SubnetSubSys
 	CallhomeSubSys       = madmin.CallhomeSubSys
 	DriveSubSys          = madmin.DriveSubSys
+	BatchSubSys          = madmin.BatchSubSys
+	BrowserSubSys        = madmin.BrowserSubSys
+
 	// Add new constants here (similar to above) if you add new fields to config.
 )
 
@@ -185,6 +188,8 @@ var SubSystemsDynamic = set.CreateStringSet(
 	AuditKafkaSubSys,
 	StorageClassSubSys,
 	CacheSubSys,
+	BatchSubSys,
+	BrowserSubSys,
 )
 
 // SubSystemsSingleTargets - subsystems which only support single target.
@@ -206,7 +211,8 @@ var SubSystemsSingleTargets = set.CreateStringSet(
 	SubnetSubSys,
 	CallhomeSubSys,
 	DriveSubSys,
-	CacheSubSys,
+	BatchSubSys,
+	BrowserSubSys,
 )
 
 // Constant separators
@@ -268,7 +274,7 @@ type KV struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 
-	Deprecated bool `json:"-"`
+	HiddenIfEmpty bool `json:"-"`
 }
 
 func (kv KV) String() string {
@@ -598,7 +604,7 @@ func LookupSite(siteKV KVS, regionKV KVS) (s Site, err error) {
 }
 
 // CheckValidKeys - checks if inputs KVS has the necessary keys,
-// returns error if it find extra or superflous keys.
+// returns error if it find extra or superfluous keys.
 func CheckValidKeys(subSys string, kv KVS, validKVS KVS, deprecatedKeys ...string) error {
 	nkv := KVS{}
 	for _, kv := range kv {
@@ -1307,9 +1313,8 @@ func (c Config) getTargetKVS(subSys, target string, redactSecrets bool) KVS {
 			// clonedKV := kv
 			// clonedKV.Value = redactedSecret
 			// resultKVS = append(resultKVS, clonedKV)
-		} else {
-			resultKVS = append(resultKVS, kv)
 		}
+		resultKVS = append(resultKVS, kv)
 	}
 
 	return resultKVS
@@ -1442,7 +1447,7 @@ func (cs *SubsysInfo) WriteTo(b *strings.Builder, off bool) {
 			continue
 		}
 		// Ignore empty and deprecated values
-		if dkv.Deprecated && kv.Value == "" {
+		if dkv.HiddenIfEmpty && kv.Value == "" {
 			continue
 		}
 		// Do not need to print if state is on

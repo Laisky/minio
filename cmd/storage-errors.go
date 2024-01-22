@@ -30,8 +30,11 @@ var errMaxVersionsExceeded = StorageErr("maximum versions exceeded, please delet
 // errUnexpected - unexpected error, requires manual intervention.
 var errUnexpected = StorageErr("unexpected error, please report this issue at https://github.com/minio/minio/issues")
 
-// errCorruptedFormat - corrupted backend format.
-var errCorruptedFormat = StorageErr("corrupted backend format, specified drive mount has unexpected previous content")
+// errCorruptedFormat - corrupted format.
+var errCorruptedFormat = StorageErr("corrupted format")
+
+// errCorruptedBackend - corrupted backend.
+var errCorruptedBackend = StorageErr("corrupted backend")
 
 // errUnformattedDisk - unformatted disk found.
 var errUnformattedDisk = StorageErr("unformatted drive found")
@@ -117,6 +120,8 @@ var errDoneForNow = errors.New("done for now")
 // errSkipFile returned by the fn() for readDirFn() when it needs
 // to proceed to next entry.
 var errSkipFile = errors.New("skip this file")
+
+var errIgnoreFileContrib = errors.New("ignore this file's contribution toward data-usage")
 
 // errXLBackend XL drive mode requires fresh deployment.
 var errXLBackend = errors.New("XL backend requires fresh drive")

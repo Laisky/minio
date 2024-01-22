@@ -44,6 +44,17 @@ type EvalRetentionBypassFn func(o ObjectInfo, gerr error) error
 // GetObjectInfoFn is the signature of GetObjectInfo function.
 type GetObjectInfoFn func(ctx context.Context, bucket, object string, opts ObjectOptions) (ObjectInfo, error)
 
+// WalkVersionsSortOrder represents the sort order in which versions of an
+// object should be returned by ObjectLayer.Walk method
+type WalkVersionsSortOrder uint8
+
+const (
+	// WalkVersionsSortAsc - Sort in ascending order of ModTime
+	WalkVersionsSortAsc WalkVersionsSortOrder = iota
+	// WalkVersionsSortDesc - Sort in descending order of ModTime
+	WalkVersionsSortDesc
+)
+
 // ObjectOptions represents object options for ObjectLayer object operations
 type ObjectOptions struct {
 	ServerSideEncryption encrypt.ServerSide
@@ -58,6 +69,9 @@ type ObjectOptions struct {
 	Tagging                 bool // Is only in GET/HEAD operations to return tagging metadata along with regular metadata and body.
 
 	UserDefined         map[string]string   // only set in case of POST/PUT operations
+	ObjectAttributes    map[string]struct{} // Attribute tags defined by the users for the GetObjectAttributes request
+	MaxParts            int                 // used in GetObjectAttributes. Signals how many parts we should return
+	PartNumberMarker    int                 // used in GetObjectAttributes. Signals the part number after which results should be returned
 	PartNumber          int                 // only useful in case of GetObject/HeadObject
 	CheckPrecondFn      CheckPreconditionFn // only set during GetObject/HeadObject/CopyObjectPart preconditional valuation
 	EvalMetadataFn      EvalMetadataFn      // only set for retention settings, meant to be used only when updating metadata in-place.
@@ -111,10 +125,11 @@ type ObjectOptions struct {
 
 // WalkOptions provides filtering, marker and other Walk() specific options.
 type WalkOptions struct {
-	Filter     func(info FileInfo) bool // return WalkFilter returns 'true/false'
-	Marker     string                   // set to skip until this object
-	LatestOnly bool                     // returns only latest versions for all matching objects
-	AskDisks   string                   // dictates how many disks are being listed
+	Filter       func(info FileInfo) bool // return WalkFilter returns 'true/false'
+	Marker       string                   // set to skip until this object
+	LatestOnly   bool                     // returns only latest versions for all matching objects
+	AskDisks     string                   // dictates how many disks are being listed
+	VersionsSort WalkVersionsSortOrder    // sort order for versions of the same object; default: Ascending order in ModTime
 }
 
 // ExpirationOptions represents object options for object expiration at objectLayer.
@@ -216,8 +231,8 @@ type ObjectLayer interface {
 	Shutdown(context.Context) error
 	NSScanner(ctx context.Context, updates chan<- DataUsageInfo, wantCycle uint32, scanMode madmin.HealScanMode) error
 	BackendInfo() madmin.BackendInfo
-	StorageInfo(ctx context.Context) StorageInfo
-	LocalStorageInfo(ctx context.Context) StorageInfo
+	StorageInfo(ctx context.Context, metrics bool) StorageInfo
+	LocalStorageInfo(ctx context.Context, metrics bool) StorageInfo
 
 	// Bucket operations.
 	MakeBucket(ctx context.Context, bucket string, opts MakeBucketOptions) error

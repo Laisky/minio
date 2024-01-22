@@ -292,7 +292,7 @@ func isMaxPartID(partID int) bool {
 	return partID > globalMaxPartID
 }
 
-// profilerWrapper is created becauses pkg/profiler doesn't
+// profilerWrapper is created because pkg/profiler doesn't
 // provide any API to calculate the profiler file path in the
 // disk since the name of this latter is randomly generated.
 type profilerWrapper struct {
@@ -1272,4 +1272,18 @@ func stringsHasPrefixFold(s, prefix string) bool {
 
 func ptr[T any](a T) *T {
 	return &a
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

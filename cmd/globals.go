@@ -25,13 +25,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/minio/console/restapi"
+	consoleapi "github.com/minio/console/api"
 	"github.com/minio/dnscache"
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/set"
+	"github.com/minio/minio/internal/bpool"
 	"github.com/minio/minio/internal/bucket/bandwidth"
 	"github.com/minio/minio/internal/config"
+	"github.com/minio/minio/internal/config/browser"
 	"github.com/minio/minio/internal/handlers"
 	"github.com/minio/minio/internal/kms"
 	"go.uber.org/atomic"
@@ -127,13 +129,47 @@ const (
 	tlsClientSessionCacheSize = 100
 )
 
-var globalCLIContext = struct {
-	JSON, Quiet    bool
-	Anonymous      bool
-	StrictS3Compat bool
-}{}
+type poolDisksLayout struct {
+	cmdline string
+	layout  [][]string
+}
+
+type disksLayout struct {
+	legacy bool
+	pools  []poolDisksLayout
+}
+
+type serverCtxt struct {
+	JSON, Quiet               bool
+	Anonymous                 bool
+	StrictS3Compat            bool
+	PreAllocate               bool
+	Addr, ConsoleAddr         string
+	ConfigDir, CertsDir       string
+	configDirSet, certsDirSet bool
+	Interface                 string
+
+	RootUser, RootPwd string
+
+	FTP  []string
+	SFTP []string
+
+	UserTimeout       time.Duration
+	ConnReadDeadline  time.Duration
+	ConnWriteDeadline time.Duration
+
+	ShutdownTimeout   time.Duration
+	IdleTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+
+	// The layout of disks as interpreted
+	Layout disksLayout
+}
 
 var (
+	// Global user opts context
+	globalServerCtxt serverCtxt
+
 	// Indicates if the running minio server is distributed setup.
 	globalIsDistErasure = false
 
@@ -155,6 +191,9 @@ var (
 
 	// Disable redirect, default is enabled.
 	globalBrowserRedirect bool
+
+	// globalBrowserConfig Browser user configurable settings
+	globalBrowserConfig browser.Config
 
 	// This flag is set to 'true' when MINIO_UPDATE env is set to 'off'. Default is false.
 	globalInplaceUpdateDisabled = false
@@ -192,6 +231,7 @@ var (
 	globalBucketMonitor     *bandwidth.Monitor
 	globalPolicySys         *PolicySys
 	globalIAMSys            *IAMSys
+	globalBytePoolCap       *bpool.BytePoolCap
 
 	globalLifecycleSys       *LifecycleSys
 	globalBucketSSEConfigSys *BucketSSEConfigSys
@@ -253,7 +293,7 @@ var (
 	// Global server's network statistics
 	globalConnStats = newConnStats()
 
-	// Global HTTP request statisitics
+	// Global HTTP request statistics
 	globalHTTPStats = newHTTPStats()
 
 	// Global bucket network and API statistics
@@ -359,7 +399,7 @@ var (
 
 	globalTierJournal *TierJournal
 
-	globalConsoleSrv *restapi.Server
+	globalConsoleSrv *consoleapi.Server
 
 	// handles service freeze or un-freeze S3 API calls.
 	globalServiceFreeze atomic.Value

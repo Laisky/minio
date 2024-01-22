@@ -202,7 +202,7 @@ func newMuxStream(ctx context.Context, msg message, c *Connection, handler Strea
 				case <-t.C:
 					last := time.Since(time.Unix(atomic.LoadInt64(&m.LastPing), 0))
 					if last > lastPingThreshold {
-						logger.LogIf(m.ctx, fmt.Errorf("canceling remote mux %d not seen for %v", m.ID, last))
+						logger.LogIf(m.ctx, fmt.Errorf("canceling remote connection %s not seen for %v", m.parent, last))
 						m.close()
 						return
 					}
@@ -228,7 +228,7 @@ func (m *muxServer) checkSeq(seq uint32) (ok bool) {
 
 func (m *muxServer) message(msg message) {
 	if debugPrint {
-		fmt.Printf("muxServer: recevied message %d, length %d\n", msg.Seq, len(msg.Payload))
+		fmt.Printf("muxServer: received message %d, length %d\n", msg.Seq, len(msg.Payload))
 	}
 	m.recvMu.Lock()
 	defer m.recvMu.Unlock()

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -102,8 +103,10 @@ func (client *peerRESTClient) GetLocks() (lockMap map[string][]lockRequesterInfo
 }
 
 // LocalStorageInfo - fetch server information for a remote node.
-func (client *peerRESTClient) LocalStorageInfo() (info StorageInfo, err error) {
-	respBody, err := client.call(peerRESTMethodLocalStorageInfo, nil, nil, -1)
+func (client *peerRESTClient) LocalStorageInfo(metrics bool) (info StorageInfo, err error) {
+	values := make(url.Values)
+	values.Set(peerRESTMetrics, strconv.FormatBool(metrics))
+	respBody, err := client.call(peerRESTMethodLocalStorageInfo, values, nil, -1)
 	if err != nil {
 		return
 	}
@@ -473,26 +476,14 @@ func (client *peerRESTClient) LoadGroup(group string) error {
 	return nil
 }
 
-type binaryInfo struct {
-	URL         *url.URL
-	Sha256Sum   []byte
-	ReleaseInfo string
-	BinaryFile  []byte
-}
-
 // VerifyBinary - sends verify binary message to remote peers.
-func (client *peerRESTClient) VerifyBinary(ctx context.Context, u *url.URL, sha256Sum []byte, releaseInfo string, readerInput []byte) error {
+func (client *peerRESTClient) VerifyBinary(ctx context.Context, u *url.URL, sha256Sum []byte, releaseInfo string, reader io.Reader) error {
 	values := make(url.Values)
-	var reader bytes.Buffer
-	if err := gob.NewEncoder(&reader).Encode(binaryInfo{
-		URL:         u,
-		Sha256Sum:   sha256Sum,
-		ReleaseInfo: releaseInfo,
-		BinaryFile:  readerInput,
-	}); err != nil {
-		return err
-	}
-	respBody, err := client.callWithContext(ctx, peerRESTMethodDownloadBinary, values, &reader, -1)
+	values.Set(peerRESTURL, u.String())
+	values.Set(peerRESTSha256Sum, hex.EncodeToString(sha256Sum))
+	values.Set(peerRESTReleaseInfo, releaseInfo)
+
+	respBody, err := client.callWithContext(ctx, peerRESTMethodVerifyBinary, values, reader, -1)
 	if err != nil {
 		return err
 	}
@@ -511,9 +502,11 @@ func (client *peerRESTClient) CommitBinary(ctx context.Context) error {
 }
 
 // SignalService - sends signal to peer nodes.
-func (client *peerRESTClient) SignalService(sig serviceSignal, subSys string) error {
+func (client *peerRESTClient) SignalService(sig serviceSignal, subSys string, dryRun, force bool) error {
 	values := make(url.Values)
 	values.Set(peerRESTSignal, strconv.Itoa(int(sig)))
+	values.Set(peerRESTDryRun, strconv.FormatBool(dryRun))
+	values.Set(peerRESTForce, strconv.FormatBool(force))
 	values.Set(peerRESTSubSys, subSys)
 	respBody, err := client.call(peerRESTMethodSignalService, values, nil, -1)
 	if err != nil {
@@ -919,6 +912,7 @@ func (client *peerRESTClient) SpeedTest(ctx context.Context, opts speedTestOpts)
 	values.Set(peerRESTDuration, opts.duration.String())
 	values.Set(peerRESTStorageClass, opts.storageClass)
 	values.Set(peerRESTBucket, opts.bucketName)
+	values.Set(peerRESTEnableSha256, strconv.FormatBool(opts.enableSha256))
 
 	respBody, err := client.callWithContext(context.Background(), peerRESTMethodSpeedTest, values, nil, -1)
 	if err != nil {

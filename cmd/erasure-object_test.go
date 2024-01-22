@@ -526,7 +526,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 			if file != "xl.meta" {
 				disk.Delete(ctx, bucket, pathJoin(object, file), DeleteOptions{
 					Recursive: true,
-					Force:     false,
+					Immediate: false,
 				})
 			}
 		}
@@ -630,7 +630,7 @@ func TestHeadObjectNoQuorum(t *testing.T) {
 			if file != "xl.meta" {
 				disk.Delete(ctx, bucket, pathJoin(object, file), DeleteOptions{
 					Recursive: true,
-					Force:     false,
+					Immediate: false,
 				})
 			}
 		}
@@ -799,7 +799,7 @@ func TestPutObjectNoQuorumSmall(t *testing.T) {
 }
 
 // Test PutObject twice, one small and another bigger
-// than small data thresold and checks reading them again
+// than small data threshold and checks reading them again
 func TestPutObjectSmallInlineData(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/minio/cli"
 	"github.com/minio/minio/internal/logger"
 	ftp "goftp.io/server/v2"
 )
@@ -51,7 +50,7 @@ func (log *minioLogger) Printf(sessionID string, format string, v ...interface{}
 	}
 }
 
-// PrintCommand impelment Logger
+// PrintCommand implement Logger
 func (log *minioLogger) PrintCommand(sessionID string, command string, params string) {
 	if serverDebugLog {
 		if command == "PASS" {
@@ -62,16 +61,14 @@ func (log *minioLogger) PrintCommand(sessionID string, command string, params st
 	}
 }
 
-// PrintResponse impelment Logger
+// PrintResponse implement Logger
 func (log *minioLogger) PrintResponse(sessionID string, code int, message string) {
 	if serverDebugLog {
 		logger.Info("%s < %d %s", sessionID, code, message)
 	}
 }
 
-func startFTPServer(c *cli.Context) {
-	args := c.StringSlice("ftp")
-
+func startFTPServer(args []string) {
 	var (
 		port          int
 		publicIP      string
